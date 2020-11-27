@@ -23,6 +23,18 @@ namespace xls {
 
 class IntegrationOptions {
  public:
+  // Used to specify different integration algorithms.
+  enum class Algorithm {
+    kBasicIntegrationAlgorithm,
+  };
+
+  // Which algorithm to use to merge functions.
+  IntegrationOptions& algorithm(Algorithm value) {
+    algorithm_ = value;
+    return *this;
+  }
+  Algorithm algorithm() const { return algorithm_; }
+
   // Whether we can program individual muxes with unique select signals
   // or if we can configure the entire graph to match one of the input
   // functions using a single select signal.
@@ -36,12 +48,26 @@ class IntegrationOptions {
 
  private:
   bool unique_select_signal_per_mux_ = false;
+  Algorithm algorithm_ = Algorithm::kBasicIntegrationAlgorithm;
 };
+
+std::ostream& operator<<(std::ostream& os,
+                         const IntegrationOptions::Algorithm& alg) {
+  switch (alg) {
+    case IntegrationOptions::Algorithm::kBasicIntegrationAlgorithm:
+      os << "kBasicIntegrationAlgorithm";
+      break;
+  }
+  return os;
+}
 
 // Class that represents an integration function i.e. a function combining the
 // IR of other functions. This class tracks which original function nodes are
 // mapped to which integration function nodes. It also provides some utilities
 // that are useful for constructing the integrated function.
+// TODO(jbaileyhandle): Consider breaking this up into 2 or more smaller
+// classes (e.g. could have a class for handling muxes, another for tracking
+// mappings etc). Should move these classes and their tests into a new file(s).
 class IntegrationFunction {
  public:
   IntegrationFunction(const IntegrationFunction& other) = delete;
@@ -56,6 +82,13 @@ class IntegrationFunction {
       Package* package, absl::Span<const Function* const> source_functions,
       const IntegrationOptions& options = IntegrationOptions(),
       std::string function_name = "IntegrationFunction");
+
+  // Create a tuple of the nodes that are the map targets of
+  // the return values of the source functions. Set this value
+  // as the return value of the integration function and return the tuple.
+  // Should not be called if a return value is already set for
+  // the integration function.
+  absl::StatusOr<Node*> MakeTupleReturnValue();
 
   Function* function() const { return function_.get(); }
   Node* global_mux_select() const { return global_mux_select_param_; }
@@ -147,6 +180,11 @@ class IntegrationFunction {
   absl::StatusOr<std::set<int64>> GetSourceFunctionIndexesOfNodesMappedToNode(
       const Node* map_target) const;
 
+  // Returns true if node_a and node_b are both map targets for nodes from a
+  // common source function (or are themselves in the common function).
+  absl::StatusOr<bool> NodeSourceFunctionsCollide(const Node* node_a,
+                                                  const Node* node_b) const;
+
   // Returns a vector of Nodes to which the operands of the node
   // 'node' map. If node is owned by the integrated function, these are just
   // node's operands. If an operand does not yet have a mapping, the operand is
@@ -157,6 +195,10 @@ class IntegrationFunction {
 
   // Returns true if 'node' is mapped to a node in the integrated function.
   bool HasMapping(const Node* node) const;
+
+  // Returns true if all operands of 'node' are mapped to a node in the
+  // integrated function.
+  bool AllOperandsHaveMapping(const Node* node) const;
 
   // Returns true if other nodes map to 'node'
   bool IsMappingTarget(const Node* node) const;
@@ -170,8 +212,8 @@ class IntegrationFunction {
   int64 GetNodeCost(const Node* node) const;
 
  private:
-  IntegrationFunction(const IntegrationOptions& options)
-      : integration_options_(options) {}
+  IntegrationFunction(Package* package, const IntegrationOptions& options)
+      : package_(package), integration_options_(options) {}
 
   // Helper function that implements the logic for merging nodes,
   // allowing for either the merge to be performed or for the cost
@@ -187,6 +229,8 @@ class IntegrationFunction {
   // 'other_added_nodes'.
   struct MergeNodesBackendResult {
     bool can_merge;
+    // Separate targets for node_a and node_b because we may derive
+    // map target nodes from the merged node;
     Node* target_a = nullptr;
     Node* target_b = nullptr;
     std::vector<UnifiedNode> changed_muxes;
@@ -281,14 +325,151 @@ class IntegrationFunction {
   // select signal.
   absl::flat_hash_map<Node*, GlobalMuxMetadata> global_mux_to_metadata_;
 
+  // Source function in the integration package.
+  std::vector<const Function*> source_functions_;
+
   // Maps each source function to a unique index.
   absl::flat_hash_map<const FunctionBase*, int64>
       source_function_base_to_index_;
 
   // Integrated function.
   std::unique_ptr<Function> function_;
-  const IntegrationOptions integration_options_;
   Package* package_;
+  const IntegrationOptions integration_options_;
+};
+
+// A abstract class for an algorithm to integrate multiple functions.
+template <class AlgorithmType>
+class IntegrationAlgorithm {
+ public:
+  IntegrationAlgorithm(const IntegrationAlgorithm& other) = delete;
+  void operator=(const IntegrationAlgorithm& other) = delete;
+
+  // Returns a function that integrates the functions in source_functions.
+  static absl::StatusOr<std::unique_ptr<IntegrationFunction>>
+  IntegrateFunctions(Package* package,
+                     absl::Span<const Function* const> source_functions,
+                     const IntegrationOptions& options = IntegrationOptions());
+
+ protected:
+  IntegrationAlgorithm(Package* package,
+                       absl::Span<const Function* const> source_functions,
+                       const IntegrationOptions& options = IntegrationOptions())
+      : package_(package), integration_options_(options) {
+    source_functions_.reserve(source_functions.size());
+    for (const auto* func : source_functions) {
+      source_functions_.push_back(func);
+    }
+  }
+
+  // Represents a possible modification to an integration function.
+  enum class IntegrationMoveType { kInsert, kMerge };
+  struct IntegrationMove {
+    Node* node;
+    IntegrationMoveType move_type;
+    Node* merge_node = nullptr;
+    int64 cost;
+  };
+
+  // Perform the modification to 'integration_function' described by 'move'.
+  absl::StatusOr<std::vector<Node*>> ExecuteMove(
+      IntegrationFunction* integration_function, const IntegrationMove& move);
+
+  // Initialize any member fields.
+  virtual absl::Status Initialize() = 0;
+
+  // Returns a function that integrates the functions in source_functions_.
+  // Runs after Initialize.
+  virtual absl::StatusOr<std::unique_ptr<IntegrationFunction>> Run() = 0;
+
+  // Create and return a new IntegrationFunction.
+  absl::StatusOr<std::unique_ptr<IntegrationFunction>>
+  NewIntegrationFunction() {
+    return IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
+        package_, source_functions_, integration_options_);
+  }
+
+  // Get the IntegrationOptions::Algorithm value corresponding to
+  // this algoirthm.
+  virtual IntegrationOptions::Algorithm
+  get_corresponding_algorithm_option() = 0;
+
+  std::vector<const Function*> source_functions_;
+  Package* package_;
+  const IntegrationOptions integration_options_;
+};
+
+// A naive merging algorithm.  A node is eligible to be added to the
+// integration function when all of its operands have already been added.
+// At each step, adds the eligible node for which the cost of adding it to
+// the function (either by inserting or merging with any integeration function
+// node) is the lowest.
+class BasicIntegrationAlgorithm
+    : public IntegrationAlgorithm<BasicIntegrationAlgorithm> {
+ public:
+  BasicIntegrationAlgorithm(const BasicIntegrationAlgorithm& other) = delete;
+  void operator=(const BasicIntegrationAlgorithm& other) = delete;
+
+ private:
+  // IntegrationAlgorithm::IntegrateFunctions needs to be able to call derived
+  // class constructor.
+  friend class IntegrationAlgorithm;
+
+  BasicIntegrationAlgorithm(
+      Package* package, absl::Span<const Function* const> source_functions,
+      const IntegrationOptions& options = IntegrationOptions())
+      : IntegrationAlgorithm(package, source_functions, options) {}
+
+  // Represents a possible modification to the integration function.
+  struct BasicIntegrationMove : IntegrationMove {
+    std::list<Node*>::iterator node_itr;
+  };
+
+  // Make a BasicIntegrationMove for an insert.
+  inline BasicIntegrationMove MakeInsertMove(
+      std::list<Node*>::iterator node_itr, int64 cost) {
+    return BasicIntegrationMove{{.node = *node_itr,
+                                 .move_type = IntegrationMoveType::kInsert,
+                                 .cost = cost},
+                                .node_itr = node_itr};
+  }
+
+  // Make a BasicIntegrationMove for a merge.
+  inline BasicIntegrationMove MakeMergeMove(std::list<Node*>::iterator node_itr,
+                                            Node* merge_node, int64 cost) {
+    return BasicIntegrationMove{{.node = *node_itr,
+                                 .move_type = IntegrationMoveType::kMerge,
+                                 .merge_node = merge_node,
+                                 .cost = cost},
+                                .node_itr = node_itr};
+  }
+
+  // Initialize member fields.
+  absl::Status Initialize();
+
+  // Returns a function that integrates the functions in source_functions_.
+  // Runs after Initialize.
+  absl::StatusOr<std::unique_ptr<IntegrationFunction>> Run();
+
+  // Get the IntegrationOptions::Algorithm value corresponding to
+  // this algoirthm.
+  IntegrationOptions::Algorithm get_corresponding_algorithm_option() {
+    return IntegrationOptions::Algorithm::kBasicIntegrationAlgorithm;
+  }
+
+  // Queue node for processing if all its operands are mapped
+  // and node has not already been queued for processing.
+  void EnqueueNodeIfReady(Node* node);
+
+  // Track nodes for which all operands are already mapped and
+  // are ready to be added to the integration_function_
+  std::list<Node*> ready_nodes_;
+
+  // Track all nodes that have ever been inserted into 'ready_nodes_'.
+  absl::flat_hash_set<Node*> queued_nodes_;
+
+  // Function combining the source functions.
+  std::unique_ptr<IntegrationFunction> integration_function_;
 };
 
 // Class used to integrate separate functions into a combined, reprogrammable
@@ -301,14 +482,24 @@ class IntegrationFunction {
 // combine the hardware used to implement the functions.
 class IntegrationBuilder {
  public:
+  IntegrationBuilder(const IntegrationBuilder& other) = delete;
+  void operator=(const IntegrationBuilder& other) = delete;
+
   // Creates an IntegrationBuilder and uses it to produce an integrated function
   // implementing all functions in source_functions_.
   static absl::StatusOr<std::unique_ptr<IntegrationBuilder>> Build(
       absl::Span<const Function* const> input_functions,
       const IntegrationOptions& options = IntegrationOptions());
 
+  // Return functions to be integrated, in the integration package.
+  absl::Span<Function*> source_functions() {
+    return absl::Span<Function*>(source_functions_);
+  }
+
   Package* package() { return package_.get(); }
-  Function* integrated_function() { return integrated_function_; }
+  const IntegrationFunction* integrated_function() {
+    return integrated_function_.get();
+  }
   const IntegrationOptions* integration_options() {
     return &integration_options_;
   }
@@ -331,15 +522,24 @@ class IntegrationBuilder {
       const Function* function,
       absl::flat_hash_map<const Function*, Function*>* call_remapping);
 
+  // Set the integrated_function_.
+  void set_integrated_function(
+      std::unique_ptr<IntegrationFunction> integrated) {
+    integrated_function_ = std::move(integrated);
+  }
+
+  // Uniquer to avoid function name collisions.
   NameUniquer function_name_uniquer_ = NameUniquer(/*separator=*/"__");
 
+  // Options dictating how to integrate functions.
   const IntegrationOptions integration_options_;
 
   // Common package for to-be integrated functions
   // and integrated function.
   std::unique_ptr<Package> package_;
 
-  Function* integrated_function_;
+  // Function (and metadata) combining the source functions.
+  std::unique_ptr<const IntegrationFunction> integrated_function_;
 
   // Functions to be integrated, in the integration package.
   std::vector<Function*> source_functions_;

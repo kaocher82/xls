@@ -30,16 +30,18 @@ namespace xls {
 namespace {
 
 using status_testing::IsOkAndHolds;
+using status_testing::StatusIs;
 using ::testing::ElementsAre;
+using ::testing::HasSubstr;
 using ::testing::UnorderedElementsAre;
 
 class IntegratorTest : public IrTestBase {};
 
-TEST_F(IntegratorTest, NoSourceFunctions) {
+TEST_F(IntegratorTest, IntegrationBuilderNoSourceFunctions) {
   EXPECT_FALSE(IntegrationBuilder::Build({}).ok());
 }
 
-TEST_F(IntegratorTest, OneSourceFunction) {
+TEST_F(IntegratorTest, IntegrationBuilderCopySourceFunctionsIntoPackage) {
   auto p = CreatePackage();
 
   FunctionBuilder fb_body("body", p.get());
@@ -65,6 +67,15 @@ TEST_F(IntegratorTest, OneSourceFunction) {
                  "invoke");
   XLS_ASSERT_OK_AND_ASSIGN(Function * main_func, fb_main.Build());
 
+  auto diff_package_dummy_p = CreatePackage();
+  FunctionBuilder fb_diff_package_dummy("diff_package_dummy",
+                                        diff_package_dummy_p.get());
+  auto diff_package_dummy_in =
+      fb_diff_package_dummy.Param("in", diff_package_dummy_p->GetBitsType(32));
+  fb_diff_package_dummy.Identity(diff_package_dummy_in);
+  XLS_ASSERT_OK_AND_ASSIGN(Function * diff_package_dummy,
+                           fb_diff_package_dummy.Build());
+
   auto get_function_names = [](Package* p) {
     std::vector<std::string> names;
     for (const auto& func : p->functions()) {
@@ -73,12 +84,15 @@ TEST_F(IntegratorTest, OneSourceFunction) {
     return names;
   };
 
-  XLS_ASSERT_OK_AND_ASSIGN(std::unique_ptr<IntegrationBuilder> builder,
-                           IntegrationBuilder::Build({main_func}));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationBuilder> builder,
+      IntegrationBuilder::Build({main_func, diff_package_dummy}));
 
-  // Original package is unchanged.
+  // Original packages are unchanged.
   EXPECT_THAT(get_function_names(p.get()),
               UnorderedElementsAre("body", "double", "main"));
+  EXPECT_THAT(get_function_names(diff_package_dummy_p.get()),
+              UnorderedElementsAre("diff_package_dummy"));
 
   // Original CountedFor
   CountedFor* counted_original =
@@ -99,16 +113,24 @@ TEST_F(IntegratorTest, OneSourceFunction) {
   EXPECT_EQ(invoke_original->to_apply()->name(), "double");
   EXPECT_EQ(invoke_original->to_apply()->package(), p.get());
 
+  // Original diff_package_dummy
+  EXPECT_THAT(diff_package_dummy->return_value(), m::Identity(m::Param("in")));
+
   // builder package has copies of functions.
-  EXPECT_THAT(get_function_names(builder->package()),
-              UnorderedElementsAre("body", "double", "main"));
+  EXPECT_THAT(
+      get_function_names(builder->package()),
+      UnorderedElementsAre("body", "double", "main", "diff_package_dummy"));
+  XLS_ASSERT_OK_AND_ASSIGN(Function * main_clone_func,
+                           builder->package()->GetFunction("main"));
   XLS_ASSERT_OK_AND_ASSIGN(Function * clone_body_func,
                            builder->package()->GetFunction("body"));
   XLS_ASSERT_OK_AND_ASSIGN(Function * clone_double_func,
                            builder->package()->GetFunction("double"));
+  XLS_ASSERT_OK_AND_ASSIGN(
+      Function * clone_diff_package_dummy,
+      builder->package()->GetFunction("diff_package_dummy"));
 
   // Clone CountedFor
-  Function* main_clone_func = builder->integrated_function();
   CountedFor* counted_clone =
       FindNode("counted_for", main_clone_func)->As<CountedFor>();
   EXPECT_EQ(counted_clone->body(), clone_body_func);
@@ -126,6 +148,10 @@ TEST_F(IntegratorTest, OneSourceFunction) {
   EXPECT_EQ(invoke_clone->to_apply(), clone_double_func);
   EXPECT_EQ(invoke_clone->to_apply()->name(), "double");
   EXPECT_EQ(invoke_clone->to_apply()->package(), builder->package());
+
+  // Clone diff_package_dummy
+  EXPECT_THAT(clone_diff_package_dummy->return_value(),
+              m::Identity(m::Param("in")));
 }
 
 TEST_F(IntegratorTest, MappingTestSimple) {
@@ -412,7 +438,8 @@ TEST_F(IntegratorTest, ParamterPacking) {
   auto a1_index = GetTupleIndexWithNumBits(2);
   EXPECT_TRUE(a1_index.has_value());
   EXPECT_TRUE(a1_index.has_value());
-  EXPECT_THAT(a1_index.value(), m::TupleIndex(m::Param("func_aParamTuple"), 0));
+  EXPECT_THAT(a1_index.value(),
+              m::TupleIndex(m::Param("func_a_ParamTuple"), 0));
   auto a1_source = GetParamWithNumBits(func_a, 2);
   EXPECT_TRUE(a1_source.has_value());
   EXPECT_TRUE(integration->HasMapping(a1_source.value()));
@@ -424,7 +451,8 @@ TEST_F(IntegratorTest, ParamterPacking) {
 
   auto a2_index = GetTupleIndexWithNumBits(4);
   EXPECT_TRUE(a2_index.has_value());
-  EXPECT_THAT(a2_index.value(), m::TupleIndex(m::Param("func_aParamTuple"), 1));
+  EXPECT_THAT(a2_index.value(),
+              m::TupleIndex(m::Param("func_a_ParamTuple"), 1));
   auto a2_source = GetParamWithNumBits(func_a, 4);
   EXPECT_TRUE(a2_source.has_value());
   EXPECT_TRUE(integration->HasMapping(a2_source.value()));
@@ -436,7 +464,8 @@ TEST_F(IntegratorTest, ParamterPacking) {
 
   auto b1_index = GetTupleIndexWithNumBits(6);
   EXPECT_TRUE(b1_index.has_value());
-  EXPECT_THAT(b1_index.value(), m::TupleIndex(m::Param("func_bParamTuple"), 0));
+  EXPECT_THAT(b1_index.value(),
+              m::TupleIndex(m::Param("func_b_ParamTuple"), 0));
   auto b1_source = GetParamWithNumBits(func_b, 6);
   EXPECT_TRUE(b1_source.has_value());
   EXPECT_TRUE(integration->HasMapping(b1_source.value()));
@@ -448,7 +477,8 @@ TEST_F(IntegratorTest, ParamterPacking) {
 
   auto b2_index = GetTupleIndexWithNumBits(8);
   EXPECT_TRUE(b2_index.has_value());
-  EXPECT_THAT(b2_index.value(), m::TupleIndex(m::Param("func_bParamTuple"), 1));
+  EXPECT_THAT(b2_index.value(),
+              m::TupleIndex(m::Param("func_b_ParamTuple"), 1));
   auto b2_source = GetParamWithNumBits(func_b, 8);
   EXPECT_TRUE(b2_source.has_value());
   EXPECT_TRUE(integration->HasMapping(b2_source.value()));
@@ -503,7 +533,8 @@ TEST_F(IntegratorTest, ParamterPackingUniversalMuxSelect) {
   auto a1_index = GetTupleIndexWithNumBits(2);
   EXPECT_TRUE(a1_index.has_value());
   EXPECT_TRUE(a1_index.has_value());
-  EXPECT_THAT(a1_index.value(), m::TupleIndex(m::Param("func_aParamTuple"), 0));
+  EXPECT_THAT(a1_index.value(),
+              m::TupleIndex(m::Param("func_a_ParamTuple"), 0));
   auto a1_source = GetParamWithNumBits(func_a, 2);
   EXPECT_TRUE(a1_source.has_value());
   EXPECT_TRUE(integration->HasMapping(a1_source.value()));
@@ -515,7 +546,8 @@ TEST_F(IntegratorTest, ParamterPackingUniversalMuxSelect) {
 
   auto a2_index = GetTupleIndexWithNumBits(4);
   EXPECT_TRUE(a2_index.has_value());
-  EXPECT_THAT(a2_index.value(), m::TupleIndex(m::Param("func_aParamTuple"), 1));
+  EXPECT_THAT(a2_index.value(),
+              m::TupleIndex(m::Param("func_a_ParamTuple"), 1));
   ;
   auto a2_source = GetParamWithNumBits(func_a, 4);
   EXPECT_TRUE(a2_source.has_value());
@@ -528,7 +560,8 @@ TEST_F(IntegratorTest, ParamterPackingUniversalMuxSelect) {
 
   auto b1_index = GetTupleIndexWithNumBits(6);
   EXPECT_TRUE(b1_index.has_value());
-  EXPECT_THAT(b1_index.value(), m::TupleIndex(m::Param("func_bParamTuple"), 0));
+  EXPECT_THAT(b1_index.value(),
+              m::TupleIndex(m::Param("func_b_ParamTuple"), 0));
   ;
   auto b1_source = GetParamWithNumBits(func_b, 6);
   EXPECT_TRUE(b1_source.has_value());
@@ -541,7 +574,8 @@ TEST_F(IntegratorTest, ParamterPackingUniversalMuxSelect) {
 
   auto b2_index = GetTupleIndexWithNumBits(8);
   EXPECT_TRUE(b2_index.has_value());
-  EXPECT_THAT(b2_index.value(), m::TupleIndex(m::Param("func_bParamTuple"), 1));
+  EXPECT_THAT(b2_index.value(),
+              m::TupleIndex(m::Param("func_b_ParamTuple"), 1));
   ;
   auto b2_source = GetParamWithNumBits(func_b, 8);
   EXPECT_TRUE(b2_source.has_value());
@@ -2077,9 +2111,17 @@ TEST_F(IntegratorTest, MergeBackendErrorNonMappedInternal) {
                                integration->function()));
 
   auto result1 = integration->GetMergeNodesCost(a_add, internal_add);
-  EXPECT_FALSE(result1.ok());
+  EXPECT_THAT(
+      result1,
+      StatusIs(
+          absl::StatusCode::kFailedPrecondition,
+          HasSubstr("Trying to merge non-mapping-target integration node")));
   auto result2 = integration->GetMergeNodesCost(internal_add, a_add);
-  EXPECT_FALSE(result2.ok());
+  EXPECT_THAT(
+      result1,
+      StatusIs(
+          absl::StatusCode::kFailedPrecondition,
+          HasSubstr("Trying to merge non-mapping-target integration node")));
 }
 
 TEST_F(IntegratorTest, MergeBackendErrorMappedExternal) {
@@ -2091,31 +2133,28 @@ TEST_F(IntegratorTest, MergeBackendErrorMappedExternal) {
   XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb.Build());
   XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, func_a->Clone("clone"));
   Node* a_in1 = FindNode("in1", func_a);
-  Node* a_in2 = FindNode("in2", func_a);
   Node* a_add = a_in1->users().at(0);
   Node* b_in1 = FindNode("in1", func_b);
-  Node* b_in2 = FindNode("in2", func_b);
   Node* b_add = b_in1->users().at(0);
 
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
-
-  XLS_ASSERT_OK(integration->InsertNode(a_in1));
-  XLS_ASSERT_OK(integration->InsertNode(a_in2));
   XLS_ASSERT_OK(integration->InsertNode(a_add));
-  XLS_ASSERT_OK(integration->InsertNode(b_in1));
-  XLS_ASSERT_OK(integration->InsertNode(b_in2));
 
   auto result1 = integration->GetMergeNodesCost(a_add, b_add);
-  EXPECT_FALSE(result1.ok());
+  EXPECT_THAT(result1, StatusIs(absl::StatusCode::kFailedPrecondition,
+                                HasSubstr("Trying to merge non-integration "
+                                          "node that already has mapping")));
   auto result2 = integration->GetMergeNodesCost(b_add, a_add);
-  EXPECT_FALSE(result2.ok());
+  EXPECT_THAT(result2, StatusIs(absl::StatusCode::kFailedPrecondition,
+                                HasSubstr("Trying to merge non-integration "
+                                          "node that already has mapping")));
 }
 
-TEST_F(IntegratorTest, MergeBackendErrorNodesFromSameFunction) {
+TEST_F(IntegratorTest, MergeBackendNodeSourceFunctionsCollide) {
   auto p = CreatePackage();
   FunctionBuilder fb("func", p.get());
   auto in1 = fb.Param("in1", p->GetBitsType(2));
@@ -2125,7 +2164,6 @@ TEST_F(IntegratorTest, MergeBackendErrorNodesFromSameFunction) {
   fb.Add(in1, in3);
   XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb.Build());
   Node* a_in1 = FindNode("in1", func_a);
-  Node* a_in2 = FindNode("in2", func_a);
   Node* a_in3 = FindNode("in3", func_a);
   Node* a_add1 = a_in1->users().at(0);
   Node* a_add2 = a_in3->users().at(0);
@@ -2133,15 +2171,12 @@ TEST_F(IntegratorTest, MergeBackendErrorNodesFromSameFunction) {
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a},
           IntegrationOptions().unique_select_signal_per_mux(true)));
 
-  XLS_ASSERT_OK(integration->InsertNode(a_in1));
-  XLS_ASSERT_OK(integration->InsertNode(a_in2));
-  XLS_ASSERT_OK(integration->InsertNode(a_in3));
-
-  auto result1 = integration->GetMergeNodesCost(a_add1, a_add2);
-  EXPECT_FALSE(result1.ok());
+  XLS_ASSERT_OK_AND_ASSIGN(auto optional_cost,
+                           integration->GetMergeNodesCost(a_add1, a_add2));
+  EXPECT_FALSE(optional_cost.has_value());
 }
 
 TEST_F(IntegratorTest, MergeBackendDoNotMergeIncompatible) {
@@ -2157,22 +2192,15 @@ TEST_F(IntegratorTest, MergeBackendDoNotMergeIncompatible) {
   fb_b.Concat({b_in1, b_in2});
   XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, fb_b.Build());
   Node* a_in1_node = FindNode("in1", func_a);
-  Node* a_in2_node = FindNode("in2", func_a);
   Node* a_add_node = a_in1_node->users().at(0);
   Node* b_in1_node = FindNode("in1", func_b);
-  Node* b_in2_node = FindNode("in2", func_b);
   Node* b_cat_node = b_in1_node->users().at(0);
 
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
-
-  XLS_ASSERT_OK(integration->InsertNode(a_in1_node));
-  XLS_ASSERT_OK(integration->InsertNode(a_in2_node));
-  XLS_ASSERT_OK(integration->InsertNode(b_in1_node));
-  XLS_ASSERT_OK(integration->InsertNode(b_in2_node));
 
   // Cost frontend.
   XLS_ASSERT_OK_AND_ASSIGN(auto optional_cost, integration->GetMergeNodesCost(
@@ -2183,7 +2211,7 @@ TEST_F(IntegratorTest, MergeBackendDoNotMergeIncompatible) {
   EXPECT_FALSE(integration->MergeNodes(a_add_node, b_cat_node).ok());
 }
 
-TEST_F(IntegratorTest, MergeCostExternalExternaTwoMux) {
+TEST_F(IntegratorTest, MergeCostExternalExternalTwoMux) {
   auto p = CreatePackage();
   FunctionBuilder fb_a("func_a", p.get());
   auto a_in1 = fb_a.Param("in1", p->GetBitsType(2));
@@ -2212,17 +2240,18 @@ TEST_F(IntegratorTest, MergeCostExternalExternaTwoMux) {
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
 
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_target,
-                           integration->InsertNode(a_in1_node));
+                           integration->GetNodeMapping(a_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in2_target,
-                           integration->InsertNode(a_in2_node));
+                           integration->GetNodeMapping(a_in2_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in1_target,
-                           integration->InsertNode(b_in1_node));
+                           integration->GetNodeMapping(b_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in2_target,
-                           integration->InsertNode(b_in2_node));
+                           integration->GetNodeMapping(b_in2_node));
+  int64 init_node_count = integration->function()->node_count();
 
   // Get cost.
   XLS_ASSERT_OK_AND_ASSIGN(auto optional_cost, integration->GetMergeNodesCost(
@@ -2242,7 +2271,7 @@ TEST_F(IntegratorTest, MergeCostExternalExternaTwoMux) {
   EXPECT_FLOAT_EQ(optional_cost.value(), expected_cost);
 
   // Check function un-altered and mappings preserved.
-  EXPECT_EQ(integration->function()->node_count(), 4);
+  EXPECT_EQ(integration->function()->node_count(), init_node_count);
   absl::flat_hash_set<Node*> found_nodes;
   for (auto* node : integration->function()->nodes()) {
     found_nodes.insert(node);
@@ -2303,18 +2332,19 @@ TEST_F(IntegratorTest, MergeCostInternalExternalOneMux) {
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
 
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_target,
-                           integration->InsertNode(a_in1_node));
+                           integration->GetNodeMapping(a_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in2_target,
-                           integration->InsertNode(a_in2_node));
+                           integration->GetNodeMapping(a_in2_node));
   XLS_ASSERT_OK(integration->SetNodeMapping(b_in1_node, a_in1_target));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in2_target,
-                           integration->InsertNode(b_in2_node));
+                           integration->GetNodeMapping(b_in2_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_add_target,
                            integration->InsertNode(a_add_node));
+  int64 init_node_count = integration->function()->node_count();
 
   // Get cost.
   XLS_ASSERT_OK_AND_ASSIGN(auto optional_cost, integration->GetMergeNodesCost(
@@ -2333,7 +2363,7 @@ TEST_F(IntegratorTest, MergeCostInternalExternalOneMux) {
   EXPECT_FLOAT_EQ(optional_cost.value(), expected_cost);
 
   // Check function un-altered and mappings preserved.
-  EXPECT_EQ(integration->function()->node_count(), 4);
+  EXPECT_EQ(integration->function()->node_count(), init_node_count);
   absl::flat_hash_set<Node*> found_nodes;
   for (auto* node : integration->function()->nodes()) {
     found_nodes.insert(node);
@@ -2407,6 +2437,7 @@ TEST_F(IntegratorTest, MergeCostGlobalMuxSelect) {
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_map,
                            integration->GetNodeMapping(a_in1));
   XLS_ASSERT_OK(integration->SetNodeMapping(b_in1, a_in1_map));
+  int64 init_node_count = integration->function()->node_count();
 
   // Get cost.
   XLS_ASSERT_OK_AND_ASSIGN(auto optional_cost,
@@ -2424,12 +2455,14 @@ TEST_F(IntegratorTest, MergeCostGlobalMuxSelect) {
                            integration->GetMergeNodesCost(b_add, a_add));
   EXPECT_TRUE(optional_cost.has_value());
   EXPECT_FLOAT_EQ(optional_cost.value(), expected_cost);
+  EXPECT_EQ(init_node_count, integration->function()->node_count());
 
   // Add node for 2nd merge cost estimate.
   XLS_ASSERT_OK_AND_ASSIGN(std::vector<Node*> merged_nodes,
                            integration->MergeNodes(a_add, b_add));
   EXPECT_EQ(merged_nodes.size(), 1);
   Node* merged_add = merged_nodes.front();
+  int64 modified_node_count = integration->function()->node_count();
 
   // Get cost.
   XLS_ASSERT_OK_AND_ASSIGN(optional_cost,
@@ -2440,6 +2473,7 @@ TEST_F(IntegratorTest, MergeCostGlobalMuxSelect) {
   EXPECT_TRUE(optional_cost.has_value());
   expected_cost = integration->GetNodeCost(ref_3_input_mux_node);
   EXPECT_FLOAT_EQ(optional_cost.value(), expected_cost);
+  EXPECT_EQ(modified_node_count, integration->function()->node_count());
 }
 
 TEST_F(IntegratorTest, MergeNodesExternalExternaTwoMux) {
@@ -2466,17 +2500,18 @@ TEST_F(IntegratorTest, MergeNodesExternalExternaTwoMux) {
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
 
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_target,
-                           integration->InsertNode(a_in1_node));
+                           integration->GetNodeMapping(a_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in2_target,
-                           integration->InsertNode(a_in2_node));
+                           integration->GetNodeMapping(a_in2_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in1_target,
-                           integration->InsertNode(b_in1_node));
+                           integration->GetNodeMapping(b_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in2_target,
-                           integration->InsertNode(b_in2_node));
+                           integration->GetNodeMapping(b_in2_node));
+  int64 init_node_count = integration->function()->node_count();
 
   // Merge.
   XLS_ASSERT_OK_AND_ASSIGN(auto generated_nodes,
@@ -2484,14 +2519,17 @@ TEST_F(IntegratorTest, MergeNodesExternalExternaTwoMux) {
   XLS_ASSERT_OK(VerifyFunction(integration->function()));
 
   // Check merge.
-  EXPECT_EQ(integration->function()->node_count(), 9);
+  EXPECT_EQ(integration->function()->node_count(), init_node_count + 5);
   EXPECT_EQ(generated_nodes.size(), 1);
   Node* add_target = generated_nodes.front();
-  EXPECT_THAT(add_target,
-              m::Add(m::Select(m::Param("a_in1_b_in1_mux_sel"),
-                               {m::Param("a_in1"), m::Param("b_in1")}),
-                     m::Select(m::Param("a_in2_b_in2_mux_sel"),
-                               {m::Param("a_in2"), m::Param("b_in2")})));
+  EXPECT_THAT(
+      add_target,
+      m::Add(m::Select(m::Param("tuple_index_8_tuple_index_11_mux_sel"),
+                       {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                        m::TupleIndex(m::Param("func_b_ParamTuple"), 0)}),
+             m::Select(m::Param("tuple_index_9_tuple_index_12_mux_sel"),
+                       {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_b_ParamTuple"), 1)})));
 
   // Check mapping.
   auto check_mapping = [&](std::vector<const Node*> srcs, const Node* target) {
@@ -2542,18 +2580,19 @@ TEST_F(IntegratorTest, MergeNodesInternalExternalOneMux) {
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
 
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_target,
-                           integration->InsertNode(a_in1_node));
+                           integration->GetNodeMapping(a_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in2_target,
-                           integration->InsertNode(a_in2_node));
+                           integration->GetNodeMapping(a_in2_node));
   XLS_ASSERT_OK(integration->SetNodeMapping(b_in1_node, a_in1_target));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in2_target,
-                           integration->InsertNode(b_in2_node));
+                           integration->GetNodeMapping(b_in2_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_add_initial_target,
                            integration->InsertNode(a_add_node));
+  int64 init_node_count = integration->function()->node_count();
 
   // Merge.
   XLS_ASSERT_OK_AND_ASSIGN(
@@ -2562,13 +2601,15 @@ TEST_F(IntegratorTest, MergeNodesInternalExternalOneMux) {
   XLS_ASSERT_OK(VerifyFunction(integration->function()));
 
   // Check merge.
-  EXPECT_EQ(integration->function()->node_count(), 6);
+  EXPECT_EQ(integration->function()->node_count(), init_node_count + 2);
   EXPECT_EQ(generated_nodes.size(), 1);
   Node* add_target = generated_nodes.front();
-  EXPECT_THAT(add_target,
-              m::Add(m::Param("a_in1"),
-                     m::Select(m::Param("a_in2_b_in2_mux_sel"),
-                               {m::Param("a_in2"), m::Param("b_in2")})));
+  EXPECT_THAT(
+      add_target,
+      m::Add(m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+             m::Select(m::Param("tuple_index_9_tuple_index_12_mux_sel"),
+                       {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_b_ParamTuple"), 1)})));
 
   // Check mapping.
   auto check_mapping = [&](std::vector<const Node*> srcs, const Node* target) {
@@ -2620,18 +2661,19 @@ TEST_F(IntegratorTest, MergeNodesExternalInternalOneMux) {
   XLS_ASSERT_OK_AND_ASSIGN(
       std::unique_ptr<IntegrationFunction> integration,
       IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
-          p.get(), {},
+          p.get(), {func_a, func_b},
           IntegrationOptions().unique_select_signal_per_mux(true)));
 
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_target,
-                           integration->InsertNode(a_in1_node));
+                           integration->GetNodeMapping(a_in1_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in2_target,
-                           integration->InsertNode(a_in2_node));
+                           integration->GetNodeMapping(a_in2_node));
   XLS_ASSERT_OK(integration->SetNodeMapping(b_in1_node, a_in1_target));
   XLS_ASSERT_OK_AND_ASSIGN(Node * b_in2_target,
-                           integration->InsertNode(b_in2_node));
+                           integration->GetNodeMapping(b_in2_node));
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_add_initial_target,
                            integration->InsertNode(a_add_node));
+  int64 init_node_count = integration->function()->node_count();
 
   // Merge.
   XLS_ASSERT_OK_AND_ASSIGN(
@@ -2640,13 +2682,15 @@ TEST_F(IntegratorTest, MergeNodesExternalInternalOneMux) {
   XLS_ASSERT_OK(VerifyFunction(integration->function()));
 
   // Check merge.
-  EXPECT_EQ(integration->function()->node_count(), 6);
+  EXPECT_EQ(integration->function()->node_count(), init_node_count + 2);
   EXPECT_EQ(generated_nodes.size(), 1);
   Node* add_target = generated_nodes.front();
-  EXPECT_THAT(add_target,
-              m::Add(m::Param("a_in1"),
-                     m::Select(m::Param("b_in2_a_in2_mux_sel"),
-                               {m::Param("b_in2"), m::Param("a_in2")})));
+  EXPECT_THAT(
+      add_target,
+      m::Add(m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+             m::Select(m::Param("tuple_index_12_tuple_index_9_mux_sel"),
+                       {m::TupleIndex(m::Param("func_b_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_a_ParamTuple"), 1)})));
 
   // Check mapping.
   auto check_mapping = [&](std::vector<const Node*> srcs, const Node* target) {
@@ -2697,6 +2741,7 @@ TEST_F(IntegratorTest, MergeNodesGlobalMuxSelect) {
   XLS_ASSERT_OK_AND_ASSIGN(Node * a_in1_map,
                            integration->GetNodeMapping(a_in1));
   XLS_ASSERT_OK(integration->SetNodeMapping(b_in1, a_in1_map));
+  int64 init_node_count = integration->function()->node_count();
 
   // Merge adds with one new mux.
   XLS_ASSERT_OK_AND_ASSIGN(std::vector<Node*> merged_nodes,
@@ -2706,12 +2751,13 @@ TEST_F(IntegratorTest, MergeNodesGlobalMuxSelect) {
   Node* merged_add = merged_nodes.front();
   EXPECT_THAT(
       merged_add,
-      m::Add(m::TupleIndex(m::Param("func_aParamTuple"), 0),
+      m::Add(m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
              m::Select(m::Param("global_mux_select"),
-                       {m::TupleIndex(m::Param("func_aParamTuple"), 1),
-                        m::TupleIndex(m::Param("func_bParamTuple"), 1),
-                        m::TupleIndex(m::Param("func_aParamTuple"), 1)},
-                       m::TupleIndex(m::Param("func_aParamTuple"), 1))));
+                       {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_b_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_a_ParamTuple"), 1)},
+                       m::TupleIndex(m::Param("func_a_ParamTuple"), 1))));
+  EXPECT_EQ(integration->function()->node_count(), init_node_count + 2);
 
   // Merge adds with one new mux and one modified mux.
   XLS_ASSERT_OK_AND_ASSIGN(std::vector<Node*> merged_nodes_repeated,
@@ -2722,15 +2768,16 @@ TEST_F(IntegratorTest, MergeNodesGlobalMuxSelect) {
   EXPECT_THAT(
       merged_add_repeated,
       m::Add(m::Select(m::Param("global_mux_select"),
-                       {m::TupleIndex(m::Param("func_aParamTuple"), 0),
-                        m::TupleIndex(m::Param("func_aParamTuple"), 0),
-                        m::TupleIndex(m::Param("func_cParamTuple"), 0)},
-                       m::TupleIndex(m::Param("func_aParamTuple"), 0)),
+                       {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                        m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                        m::TupleIndex(m::Param("func_c_ParamTuple"), 0)},
+                       m::TupleIndex(m::Param("func_a_ParamTuple"), 0)),
              m::Select(m::Param("global_mux_select"),
-                       {m::TupleIndex(m::Param("func_aParamTuple"), 1),
-                        m::TupleIndex(m::Param("func_bParamTuple"), 1),
-                        m::TupleIndex(m::Param("func_cParamTuple"), 1)},
-                       m::TupleIndex(m::Param("func_aParamTuple"), 1))));
+                       {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_b_ParamTuple"), 1),
+                        m::TupleIndex(m::Param("func_c_ParamTuple"), 1)},
+                       m::TupleIndex(m::Param("func_a_ParamTuple"), 1))));
+  EXPECT_EQ(integration->function()->node_count(), init_node_count + 3);
 }
 
 TEST_F(IntegratorTest, GetSourceFunctionIndexOfNodeTest) {
@@ -2824,6 +2871,470 @@ TEST_F(IntegratorTest, GetSourceFunctionIndexesOfNodesMappedToNodeTest) {
   auto non_map_target_result =
       integration->GetSourceFunctionIndexesOfNodesMappedToNode(internal_3);
   EXPECT_FALSE(non_map_target_result.ok());
+}
+
+TEST_F(IntegratorTest, MakeTupleReturnValueTest) {
+  auto p = CreatePackage();
+  FunctionBuilder fb_a("func_a", p.get());
+  auto a_in1 = fb_a.Param("in1", p->GetBitsType(2));
+  fb_a.Add(a_in1, a_in1,
+           /*loc=*/absl::nullopt, "add");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb_a.Build());
+  Node* a_add_node = FindNode("add", func_a);
+
+  FunctionBuilder fb_b("func_b", p.get());
+  auto b_in1 = fb_b.Param("in1", p->GetBitsType(2));
+  fb_b.UMul(b_in1, b_in1,
+            /*loc=*/absl::nullopt, "mul");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, fb_b.Build());
+  Node* b_add_node = FindNode("mul", func_b);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationFunction> integration,
+      IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
+          p.get(), {func_a, func_b},
+          IntegrationOptions().unique_select_signal_per_mux(false)));
+  XLS_ASSERT_OK(integration->InsertNode(a_add_node).status());
+  XLS_ASSERT_OK(integration->InsertNode(b_add_node).status());
+  XLS_ASSERT_OK_AND_ASSIGN(Node * ret_value,
+                           integration->MakeTupleReturnValue());
+
+  EXPECT_EQ(ret_value, integration->function()->return_value());
+  EXPECT_THAT(
+      ret_value,
+      m::Tuple(m::Add(m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                      m::TupleIndex(m::Param("func_a_ParamTuple"), 0)),
+               m::UMul(m::TupleIndex(m::Param("func_b_ParamTuple"), 0),
+                       m::TupleIndex(m::Param("func_b_ParamTuple"), 0))));
+}
+
+TEST_F(IntegratorTest, MakeTupleReturnValueErrors) {
+  auto p = CreatePackage();
+  FunctionBuilder fb_a("func_a", p.get());
+  auto a_in1 = fb_a.Param("in1", p->GetBitsType(2));
+  fb_a.Add(a_in1, a_in1,
+           /*loc=*/absl::nullopt, "add");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb_a.Build());
+  Node* a_add_node = FindNode("add", func_a);
+
+  FunctionBuilder fb_b("func_b", p.get());
+  auto b_in1 = fb_b.Param("in1", p->GetBitsType(2));
+  fb_b.UMul(b_in1, b_in1,
+            /*loc=*/absl::nullopt, "mul");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, fb_b.Build());
+  Node* b_add_node = FindNode("mul", func_b);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationFunction> integration,
+      IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
+          p.get(), {func_a, func_b},
+          IntegrationOptions().unique_select_signal_per_mux(false)));
+  XLS_ASSERT_OK(integration->InsertNode(a_add_node).status());
+
+  // Can't make tuple output if not all source function return values have a
+  // mapping in the integration function.
+  auto missing_mapping_result = integration->MakeTupleReturnValue();
+  EXPECT_FALSE(missing_mapping_result.ok());
+
+  XLS_ASSERT_OK(integration->InsertNode(b_add_node).status());
+  XLS_ASSERT_OK_AND_ASSIGN(Node * ret_value,
+                           integration->MakeTupleReturnValue());
+  EXPECT_EQ(ret_value, integration->function()->return_value());
+  EXPECT_THAT(
+      ret_value,
+      m::Tuple(m::Add(m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                      m::TupleIndex(m::Param("func_a_ParamTuple"), 0)),
+               m::UMul(m::TupleIndex(m::Param("func_b_ParamTuple"), 0),
+                       m::TupleIndex(m::Param("func_b_ParamTuple"), 0))));
+
+  // Can only call MakeTupleReturnValue once.
+  auto repeate_result = integration->MakeTupleReturnValue();
+  EXPECT_FALSE(repeate_result.ok());
+}
+
+TEST_F(IntegratorTest, AllOperandsHaveMappingTest) {
+  auto p = CreatePackage();
+  FunctionBuilder fb_a("func_a", p.get());
+  auto in1 = fb_a.Param("in1", p->GetBitsType(2));
+  auto op1 = fb_a.Add(in1, in1,
+                      /*loc=*/absl::nullopt, "op1");
+  auto op2 = fb_a.Add(in1, in1,
+                      /*loc=*/absl::nullopt, "op2");
+  fb_a.Add(op1, op2,
+           /*loc=*/absl::nullopt, "add");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb_a.Build());
+  Node* op1_node = FindNode("op1", func_a);
+  Node* op2_node = FindNode("op2", func_a);
+  Node* add_node = FindNode("add", func_a);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationFunction> integration,
+      IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
+          p.get(), {func_a},
+          IntegrationOptions().unique_select_signal_per_mux(false)));
+
+  EXPECT_FALSE(integration->AllOperandsHaveMapping(add_node));
+  XLS_ASSERT_OK(integration->InsertNode(op1_node).status());
+  EXPECT_FALSE(integration->AllOperandsHaveMapping(add_node));
+  XLS_ASSERT_OK(integration->InsertNode(op2_node).status());
+  EXPECT_TRUE(integration->AllOperandsHaveMapping(add_node));
+}
+
+TEST_F(IntegratorTest, NodeSourceFunctionsCollideTest) {
+  auto p = CreatePackage();
+  FunctionBuilder fb("func", p.get());
+  auto in1 = fb.Param("in1", p->GetBitsType(2));
+  fb.Add(in1, in1,
+         /*loc=*/absl::nullopt, "add1");
+  fb.Add(in1, in1,
+         /*loc=*/absl::nullopt, "add2");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb.Build());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, func_a->Clone("func_b"));
+  Node* a_add1 = FindNode("add1", func_a);
+  Node* a_add2 = FindNode("add2", func_a);
+  Node* b_add1 = FindNode("add1", func_b);
+  Node* b_add2 = FindNode("add2", func_b);
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationFunction> integration,
+      IntegrationFunction::MakeIntegrationFunctionWithParamTuples(
+          p.get(), {func_a, func_b}));
+
+  XLS_ASSERT_OK_AND_ASSIGN(Node * a_add1_internal,
+                           integration->InsertNode(a_add1));
+  XLS_ASSERT_OK_AND_ASSIGN(Node * a_add2_internal,
+                           integration->InsertNode(a_add2));
+  XLS_ASSERT_OK_AND_ASSIGN(Node * b_add1_internal,
+                           integration->InsertNode(b_add1));
+  XLS_ASSERT_OK(integration->SetNodeMapping(b_add2, a_add2_internal));
+
+  // Two external nodes.
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add1, b_add1),
+              IsOkAndHolds(false));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add1, b_add1),
+              IsOkAndHolds(false));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add1, a_add2),
+              IsOkAndHolds(true));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add2, a_add1),
+              IsOkAndHolds(true));
+
+  // One internal, one external node.
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add1_internal, b_add1),
+              IsOkAndHolds(false));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(b_add1, a_add1_internal),
+              IsOkAndHolds(false));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add1_internal, a_add1),
+              IsOkAndHolds(true));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add1, a_add1_internal),
+              IsOkAndHolds(true));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(a_add2_internal, b_add1),
+              IsOkAndHolds(true));
+  EXPECT_THAT(integration->NodeSourceFunctionsCollide(b_add1, a_add2_internal),
+              IsOkAndHolds(true));
+
+  // Two internal nodes.
+  EXPECT_THAT(
+      integration->NodeSourceFunctionsCollide(a_add1_internal, b_add1_internal),
+      IsOkAndHolds(false));
+  EXPECT_THAT(
+      integration->NodeSourceFunctionsCollide(b_add1_internal, a_add1_internal),
+      IsOkAndHolds(false));
+  EXPECT_THAT(
+      integration->NodeSourceFunctionsCollide(a_add1_internal, a_add2_internal),
+      IsOkAndHolds(true));
+  EXPECT_THAT(
+      integration->NodeSourceFunctionsCollide(a_add2_internal, a_add1_internal),
+      IsOkAndHolds(true));
+}
+
+TEST_F(IntegratorTest, BasicIntegrationIdentical) {
+  auto p = CreatePackage();
+  FunctionBuilder fb("func_a", p.get());
+  auto in1 = fb.Param("in1", p->GetBitsType(2));
+  auto in2 = fb.Param("in2", p->GetBitsType(2));
+  auto in3 = fb.Param("in3", p->GetBitsType(2));
+  auto in4 = fb.Param("in4", p->GetBitsType(2));
+  auto add1 = fb.Add(in1, in2,
+                     /*loc=*/absl::nullopt, "add1");
+  auto add2 = fb.Add(in3, in4,
+                     /*loc=*/absl::nullopt, "add2");
+  fb.UMul(add1, add2,
+          /*loc=*/absl::nullopt, "mul");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb.Build());
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, func_a->Clone("func_b"));
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationBuilder> builder,
+      IntegrationBuilder::Build(
+          {func_a, func_b},
+          IntegrationOptions().algorithm(
+              IntegrationOptions::Algorithm::kBasicIntegrationAlgorithm)));
+
+  Function* function = builder->integrated_function()->function();
+  EXPECT_EQ(function->node_count(), 19);
+  EXPECT_THAT(
+      builder->integrated_function()->function()->return_value(),
+      m::Tuple(
+          m::UMul(
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 0)}),
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 1)})),
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 2)}),
+                  m::Select(
+                      m::Param("global_mux_select"),
+                      {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                       m::TupleIndex(m::Param("func_b_ParamTuple"), 3)}))),
+          // Duplicate the above.
+          m::UMul(
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 0)}),
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 1)})),
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 2)}),
+                  m::Select(
+                      m::Param("global_mux_select"),
+                      {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                       m::TupleIndex(m::Param("func_b_ParamTuple"), 3)})))));
+}
+
+TEST_F(IntegratorTest, BasicIntegrationDifferentOutput) {
+  auto p = CreatePackage();
+  FunctionBuilder fb_a("func_a", p.get());
+  auto a_in1 = fb_a.Param("in1", p->GetBitsType(2));
+  auto a_in2 = fb_a.Param("in2", p->GetBitsType(2));
+  auto a_in3 = fb_a.Param("in3", p->GetBitsType(2));
+  auto a_in4 = fb_a.Param("in4", p->GetBitsType(2));
+  auto a_add1 = fb_a.Add(a_in1, a_in2,
+                         /*loc=*/absl::nullopt, "add1");
+  auto a_add2 = fb_a.Add(a_in3, a_in4,
+                         /*loc=*/absl::nullopt, "add2");
+  fb_a.And(a_add1, a_add2,
+           /*loc=*/absl::nullopt, "and");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb_a.Build());
+
+  FunctionBuilder fb_b("func_b", p.get());
+  auto b_in1 = fb_b.Param("in1", p->GetBitsType(2));
+  auto b_in2 = fb_b.Param("in2", p->GetBitsType(2));
+  auto b_in3 = fb_b.Param("in3", p->GetBitsType(2));
+  auto b_in4 = fb_b.Param("in4", p->GetBitsType(2));
+  auto b_add1 = fb_b.Add(b_in1, b_in2,
+                         /*loc=*/absl::nullopt, "add1");
+  auto b_add2 = fb_b.Add(b_in3, b_in4,
+                         /*loc=*/absl::nullopt, "add2");
+  fb_b.Or(b_add1, b_add2,
+          /*loc=*/absl::nullopt, "or");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, fb_b.Build());
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationBuilder> builder,
+      IntegrationBuilder::Build(
+          {func_a, func_b},
+          IntegrationOptions().algorithm(
+              IntegrationOptions::Algorithm::kBasicIntegrationAlgorithm)));
+
+  Function* function = builder->integrated_function()->function();
+  EXPECT_EQ(function->node_count(), 20);
+  EXPECT_THAT(
+      builder->integrated_function()->function()->return_value(),
+      m::Tuple(
+          m::And(
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 0)}),
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 1)})),
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 2)}),
+                  m::Select(
+                      m::Param("global_mux_select"),
+                      {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                       m::TupleIndex(m::Param("func_b_ParamTuple"), 3)}))),
+          m::Or(
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 0)}),
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 1)})),
+              m::Add(
+                  m::Select(m::Param("global_mux_select"),
+                            {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                             m::TupleIndex(m::Param("func_b_ParamTuple"), 2)}),
+                  m::Select(
+                      m::Param("global_mux_select"),
+                      {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                       m::TupleIndex(m::Param("func_b_ParamTuple"), 3)})))));
+}
+
+TEST_F(IntegratorTest, BasicIntegrationDifferentIntermediate) {
+  auto p = CreatePackage();
+  FunctionBuilder fb_a("func_a", p.get());
+  auto a_in1 = fb_a.Param("in1", p->GetBitsType(2));
+  auto a_in2 = fb_a.Param("in2", p->GetBitsType(2));
+  auto a_in3 = fb_a.Param("in3", p->GetBitsType(2));
+  auto a_in4 = fb_a.Param("in4", p->GetBitsType(2));
+  auto a_in5 = fb_a.Param("in5", p->GetBitsType(2));
+  auto a_add1 = fb_a.Add(a_in1, a_in2,
+                         /*loc=*/absl::nullopt, "add1");
+  auto a_add2 = fb_a.Add(a_in3, a_in4,
+                         /*loc=*/absl::nullopt, "add2");
+  auto a_and = fb_a.And(a_add1, a_add2,
+                        /*loc=*/absl::nullopt, "and");
+  fb_a.UMul(a_in5, a_and,
+            /*loc=*/absl::nullopt, "mul");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_a, fb_a.Build());
+
+  FunctionBuilder fb_b("func_b", p.get());
+  auto b_in1 = fb_b.Param("in1", p->GetBitsType(2));
+  auto b_in2 = fb_b.Param("in2", p->GetBitsType(2));
+  auto b_in3 = fb_b.Param("in3", p->GetBitsType(2));
+  auto b_in4 = fb_b.Param("in4", p->GetBitsType(2));
+  auto b_in5 = fb_b.Param("in5", p->GetBitsType(2));
+  auto b_add1 = fb_b.Add(b_in1, b_in2,
+                         /*loc=*/absl::nullopt, "add1");
+  auto b_add2 = fb_b.Add(b_in3, b_in4,
+                         /*loc=*/absl::nullopt, "add2");
+  auto b_or = fb_b.Or(b_add1, b_add2,
+                      /*loc=*/absl::nullopt, "or");
+  fb_b.UMul(b_in5, b_or,
+            /*loc=*/absl::nullopt, "mul");
+  XLS_ASSERT_OK_AND_ASSIGN(Function * func_b, fb_b.Build());
+
+  XLS_ASSERT_OK_AND_ASSIGN(
+      std::unique_ptr<IntegrationBuilder> builder,
+      IntegrationBuilder::Build(
+          {func_a, func_b},
+          IntegrationOptions().algorithm(
+              IntegrationOptions::Algorithm::kBasicIntegrationAlgorithm)));
+
+  Function* function = builder->integrated_function()->function();
+  EXPECT_EQ(function->node_count(), 25);
+  EXPECT_THAT(
+      builder->integrated_function()->function()->return_value(),
+      m::Tuple(
+          m::UMul(
+              m::Select(m::Param("global_mux_select"),
+                        {m::TupleIndex(m::Param("func_a_ParamTuple"), 4),
+                         m::TupleIndex(m::Param("func_b_ParamTuple"), 4)}),
+              m::Select(
+                  m::Param("global_mux_select"),
+                  {m::And(
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              0)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              1)})),
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              2)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              3)}))),
+                   m::Or(
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              0)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              1)})),
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              2)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              3)})))})),
+          // Duplicate the above.
+          m::UMul(
+              m::Select(m::Param("global_mux_select"),
+                        {m::TupleIndex(m::Param("func_a_ParamTuple"), 4),
+                         m::TupleIndex(m::Param("func_b_ParamTuple"), 4)}),
+              m::Select(
+                  m::Param("global_mux_select"),
+                  {m::And(
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              0)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              1)})),
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              2)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              3)}))),
+                   m::Or(
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 0),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              0)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 1),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              1)})),
+                       m::Add(
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 2),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              2)}),
+                           m::Select(
+                               m::Param("global_mux_select"),
+                               {m::TupleIndex(m::Param("func_a_ParamTuple"), 3),
+                                m::TupleIndex(m::Param("func_b_ParamTuple"),
+                                              3)})))}))));
 }
 
 }  // namespace
