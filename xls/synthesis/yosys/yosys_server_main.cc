@@ -28,6 +28,7 @@
 #include "xls/common/init_xls.h"
 #include "xls/common/logging/log_lines.h"
 #include "xls/common/logging/logging.h"
+#include "xls/common/status/ret_check.h"
 #include "xls/common/status/status_macros.h"
 #include "xls/common/subprocess.h"
 #include "xls/synthesis/server_credentials.h"
@@ -50,6 +51,7 @@ ABSL_FLAG(std::string, nextpnr_path, "", "The path to the nextpnr binary.");
 ABSL_FLAG(std::string, synthesis_target, "",
           "The backend to target for synthesis; e.g. ice40, ecp5.");
 ABSL_FLAG(bool, save_temps, false, "Do not delete temporary files.");
+ABSL_FLAG(bool, synthesis_only, false, "Perform synthesis but not place and route");
 
 namespace xls {
 namespace synthesis {
@@ -145,44 +147,53 @@ class YosysSynthesisServiceImpl : public SynthesisService::Service {
     XLS_ASSIGN_OR_RETURN(std::string netlist, GetFileContents(netlist_path));
     result->set_netlist(netlist);
 
+    // Add stats in response.
+    XLS_ASSIGN_OR_RETURN(YosysSynthesisStatistics parse_stats, ParseYosysOutput(yosys_stdout));
+    XLS_RET_CHECK(!result->has_instance_count());
+    for(const auto name_count : parse_stats.cell_histogram) {
+      (*result->mutable_instance_count()->mutable_cell_histogram())[name_count.first] = name_count.second;
+    }
+
     // Invoke nextpnr for place and route.
-    absl::optional<std::filesystem::path> pnr_path;
-    std::vector<std::string> nextpnr_args = {nextpnr_path_, "--json",
-                                             netlist_path.string()};
+    if (!absl::GetFlag(FLAGS_synthesis_only)) {
+      absl::optional<std::filesystem::path> pnr_path;
+      std::vector<std::string> nextpnr_args = {nextpnr_path_, "--json",
+                                               netlist_path.string()};
 
-    if (synthesis_target_ == "ecp5") {
-      nextpnr_args.push_back("--45k");
-      nextpnr_args.push_back("--textcfg");
-      pnr_path = temp_dir_path / "pnr.cfg";
-      nextpnr_args.push_back(pnr_path->string());
-    } else if (synthesis_target_ == "ice40") {
-      nextpnr_args.push_back("--hx8k");
-    }
+      if (synthesis_target_ == "ecp5") {
+        nextpnr_args.push_back("--45k");
+        nextpnr_args.push_back("--textcfg");
+        pnr_path = temp_dir_path / "pnr.cfg";
+        nextpnr_args.push_back(pnr_path->string());
+      } else if (synthesis_target_ == "ice40") {
+        nextpnr_args.push_back("--hx8k");
+      }
 
-    if (request->has_target_frequency_hz()) {
-      nextpnr_args.push_back("--freq");
-      nextpnr_args.push_back(
-          absl::StrCat(request->has_target_frequency_hz() / 1000000));
-    }
-    XLS_ASSIGN_OR_RETURN(string_pair, RunSubprocess(nextpnr_args));
-    auto [nextpnr_stdout, nextpnr_stderr] = string_pair;
-    if (absl::GetFlag(FLAGS_save_temps)) {
-      XLS_RETURN_IF_ERROR(
-          SetFileContents(temp_dir_path / "nextpnr.stdout", nextpnr_stdout));
-      XLS_RETURN_IF_ERROR(
-          SetFileContents(temp_dir_path / "nextpnr.stderr", nextpnr_stderr));
-    }
+      if (request->has_target_frequency_hz()) {
+        nextpnr_args.push_back("--freq");
+        nextpnr_args.push_back(
+            absl::StrCat(request->has_target_frequency_hz() / 1000000));
+      }
+      XLS_ASSIGN_OR_RETURN(string_pair, RunSubprocess(nextpnr_args));
+      auto [nextpnr_stdout, nextpnr_stderr] = string_pair;
+      if (absl::GetFlag(FLAGS_save_temps)) {
+        XLS_RETURN_IF_ERROR(
+            SetFileContents(temp_dir_path / "nextpnr.stdout", nextpnr_stdout));
+        XLS_RETURN_IF_ERROR(
+            SetFileContents(temp_dir_path / "nextpnr.stderr", nextpnr_stderr));
+      }
 
-    if (pnr_path.has_value()) {
-      XLS_ASSIGN_OR_RETURN(std::string pnr_result, GetFileContents(*pnr_path));
-      result->set_place_and_route_result(pnr_result);
-    }
+      if (pnr_path.has_value()) {
+        XLS_ASSIGN_OR_RETURN(std::string pnr_result, GetFileContents(*pnr_path));
+        result->set_place_and_route_result(pnr_result);
+      }
 
-    // Parse the stderr from nextpnr to get the maximum frequency.
-    XLS_ASSIGN_OR_RETURN(int64 max_frequency_hz,
-                         ParseNextpnrOutput(nextpnr_stderr));
-    result->set_max_frequency_hz(max_frequency_hz);
-    XLS_LOG(INFO) << "max_frequency_mhz: " << (max_frequency_hz / 1e6);
+      // Parse the stderr from nextpnr to get the maximum frequency.
+      XLS_ASSIGN_OR_RETURN(int64 max_frequency_hz,
+                           ParseNextpnrOutput(nextpnr_stderr));
+      result->set_max_frequency_hz(max_frequency_hz);
+      XLS_LOG(INFO) << "max_frequency_mhz: " << (max_frequency_hz / 1e6);
+    }
 
     return absl::OkStatus();
   }

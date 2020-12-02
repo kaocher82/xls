@@ -55,6 +55,8 @@ def generate_ir_package(op: str,
                         output_type: str,
                         operand_types: Sequence[str],
                         attributes: Sequence[Tuple[str, str]] = (),
+                        operand_attributes: Sequence[Tuple[str, int]] = (),
+                        operand_span_attributes: Sequence[Tuple[str, int, int]] = (),
                         literal_operand: Optional[int] = None) -> str:
   """Generates an IR package containing a operation of the given op.
 
@@ -76,6 +78,15 @@ def generate_ir_package(op: str,
       ("bits[32]", "bits[16]").
     attributes: Attributes to include in the operation mnemonic. For example,
       "new_bit_count" in extend operations.
+    operand_attributes: Attributes consisting of an operand to include in the
+      operation mnemonic. Each element of the sequence specifies the attribute
+      name and the index of the first operand (within 'operand_types').
+      For example, used for "defualt" in sel operations.
+    operand_span_attributes: Attributes consisting of 1 or more operand to include
+      in the operation mnemonic. Each element of the sequence specifies the attribute
+      name, the index of the first operand (within 'operand_types'), and
+      the number of operands in the span.
+      For example, used for "cases" in sel operations.
     literal_operand: Optionally specifies that the given operand number should
       be substituted with a randomly generated literal instead of a function
       parameter.
@@ -83,12 +94,23 @@ def generate_ir_package(op: str,
   Returns:
     The text of the IR package.
   """
+  def _insert_operand_attributes(operands):
+    for op_span in operand_span_attributes:
+      (attribute, begin, size) = op_span
+      end = begin+size-1
+      operands[begin] = attribute + '=[' + operands[begin]
+      operands[end] = operands[end] + ']'
+    for op_span in operand_attributes:
+      (attribute, index) = op_span
+      operands[index] = attribute + '=' + operands[index]
+
   params = [
       f'op{i}: {operand_types[i]}' for i in range(len(operand_types))
       if i != literal_operand
   ]
   if literal_operand is None:
     operands = [f'op{i}' for i in range(len(operand_types))]
+    _insert_operand_attributes(operands)
     ir_text = textwrap.dedent("""\
     package {op}_characterization
 
@@ -103,8 +125,9 @@ def generate_ir_package(op: str,
   else:
     literal_type = operand_types[literal_operand]
     literal_value = _generate_literal(literal_type)
-    operands = ('literal.1' if i == literal_operand else f'op{i}'
+    operands = list('literal.1' if i == literal_operand else f'op{i}'
                 for i in range(len(operand_types)))
+    _insert_operand_attributes(operands)
     ir_text = textwrap.dedent("""\
     package {op}_characterization
 

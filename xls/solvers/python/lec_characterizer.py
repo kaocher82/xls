@@ -104,8 +104,8 @@ class LecCharacterizer(object):
     op_name = op_pb2.OpProto.Name(op)[3:].lower()
     operand_type_strs = [self._proto_to_ir_type(ot) for ot in operand_types]
     ir_text = op_module_generator.generate_ir_package(
-        op_name, self._proto_to_ir_type(output_type), operand_type_strs, [],
-        None)
+        op_name, self._proto_to_ir_type(output_type), operand_type_strs, attributes=[],
+        operand_attributes=[], operand_span_attributes=[], literal_operand=None)
     verilog_text = op_module_generator.generate_verilog_module(
         self._MODULE_NAME, ir_text).verilog_text
 

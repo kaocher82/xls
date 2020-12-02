@@ -103,6 +103,40 @@ fn main(op1: bits[3], op2: bits[17]) -> bits[17][4] {
             operand_types=('bits[17][4]', 'bits[3]', 'bits[17]'),
             literal_operand=0))
 
+  def test_select(self):
+    self.assertEqual(
+        """package sel_characterization
+
+fn main(op0: bits[2], op1: bits[16], op2: bits[16], op3: bits[16], op4: bits[16]) -> bits[16] {
+  ret sel.1: bits[16] = sel(op0, cases=[op1, op2, op3], default=op4)
+}""",
+        opgen.generate_ir_package(
+            'sel',
+            output_type='bits[16]',
+            operand_types=('bits[2]','bits[16]', 'bits[16]',
+              'bits[16]', 'bits[16]'),
+            operand_attributes=[('default', 4)],
+            operand_span_attributes=[('cases', 1, 3)],
+            ))
+
+  def test_select_with_literal(self):
+    self.assertEqual(
+        """package sel_characterization
+
+fn main(op0: bits[2], op2: bits[16], op3: bits[16], op4: bits[16]) -> bits[16] {
+  literal.1: bits[16] = literal(value=0xd82c)
+  ret sel.2: bits[16] = sel(op0, cases=[literal.1, op2, op3], default=op4)
+}""",
+        opgen.generate_ir_package(
+            'sel',
+            output_type='bits[16]',
+            operand_types=('bits[2]','bits[16]', 'bits[16]',
+              'bits[16]', 'bits[16]'),
+            operand_attributes=[('default', 4)],
+            operand_span_attributes=[('cases', 1, 3)],
+            literal_operand=1
+            ))
+
   def test_invalid_ir(self):
     with self.assertRaisesRegex(Exception, 'does not match expected type'):
       opgen.generate_ir_package(
